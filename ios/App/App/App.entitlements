@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  HealthKit entitlement, written by hand because there is no Mac on which to tick the
+	  capability box in Xcode. Xcode normally does two things at once here: it writes this
+	  file, and it enables HealthKit on the App ID in Apple's developer portal.
+
+	  This file is only the first half. The App ID must also have HealthKit enabled at
+	  developer.apple.com › Certificates, Identifiers & Profiles › Identifiers › com.varun.ignyt,
+	  which is a browser page and needs no Mac. Without that, signing fails with a message
+	  about the provisioning profile not including the com.apple.developer.healthkit
+	  entitlement — which reads like a certificate problem and is not one.
+	-->
+	<key>com.apple.developer.healthkit</key>
+	<true/>
+	<!--
+	  Declares which HealthKit data classes the app touches. Clinical records are deliberately
+	  absent: IGNYT reads fitness data only, and requesting clinical access would trigger a
+	  much heavier App Store review for a capability the app never uses.
+	-->
+	<key>com.apple.developer.healthkit.access</key>
+	<array/>
+</dict>
+</plist>

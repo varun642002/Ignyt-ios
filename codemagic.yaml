@@ -1,0 +1,149 @@
+# Codemagic CI — the iOS build for IGNYT.
+#
+# THE STRUCTURE THIS ASSUMES
+# The app itself is not in this repo. www/ lives in Ignyt-testing- and is mounted here as
+# the `ignyt-app` submodule, with capacitor.config.json pointing webDir at ignyt-app/www.
+# That keeps one copy of the web layer while leaving the two platforms otherwise separate:
+# 568 files under www/ changed in a single week recently, and a second copy would spend
+# every one of them drifting.
+#
+# The practical consequence for CI: the submodule must be checked out before anything else,
+# or `cap sync` copies from a directory that does not exist and the app builds to a blank
+# screen rather than failing.
+#
+# TWO WORKFLOWS, AND THE ORDER MATTERS
+#   ios-compile-check   No signing, no Apple account, no money. Run this until it is green.
+#   ios-testflight      Signed, published to TestFlight. Needs the Developer Program.
+#
+# Builds are not push-triggered: the free tier is 500 minutes a month and an iOS build costs
+# 10-20 of them. Start them from the Codemagic UI.
+
+workflows:
+
+  # ---------------------------------------------------------------------------------------
+  ios-compile-check:
+    name: iOS compile check (unsigned)
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      # Capacitor 8's CLI declares engines.node >=22. Node 20 fails at `cap sync` with a
+      # message that names the version but not the file that asked for it.
+      node: 22
+      xcode: latest
+    scripts:
+      - name: Check out the app submodule
+        # --depth 1 because only the pinned commit is needed; the full history of the app
+        # repo is a large download this build has no use for.
+        script: |
+          git submodule update --init --recursive --depth 1
+          echo "app pinned at: $(git -C ignyt-app rev-parse --short HEAD)"
+          echo "www files:     $(find ignyt-app/www -type f | wc -l)"
+
+      - name: Install dependencies
+        script: npm ci
+
+      - name: Sync the web layer into the iOS project
+        # Reads webDir from capacitor.config.json — ignyt-app/www — and copies it into
+        # ios/App/App/public, which is gitignored precisely because it is generated.
+        script: npx cap sync ios
+
+      - name: Show what will be built
+        script: |
+          echo "Swift sources in the target:"
+          grep -o '[A-Za-z]*\.swift in Sources' ios/App/App.xcodeproj/project.pbxproj | sort -u
+          echo "Web files synced: $(find ios/App/App/public -type f | wc -l)"
+
+      - name: Compile for the simulator, unsigned
+        # CODE_SIGNING_ALLOWED=NO is what removes the need for an Apple account. The
+        # entitlements file is ignored when nothing is signed, so HealthKit does not have to
+        # be registered against the App ID before this will compile.
+        script: |
+          set -o pipefail
+          xcodebuild \
+            -project ios/App/App.xcodeproj \
+            -scheme App \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build 2>&1 | tee /tmp/xcode-build.log
+    artifacts:
+      # Kept whether the build passes or fails — on a failure this log is the deliverable.
+      - /tmp/xcode-build.log
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
+    publishing:
+      email:
+        recipients:
+          - varun642002@gmail.com
+        notify:
+          success: false
+          failure: true
+
+  # ---------------------------------------------------------------------------------------
+  ios-testflight:
+    name: iOS release to TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      # Create in Codemagic: Teams > Integrations > Developer Portal > Add key, from an App
+      # Store Connect API key (appstoreconnect.apple.com > Users and Access > Integrations).
+      # The name must match this string exactly.
+      app_store_connect: ignyt-app-store-connect
+    environment:
+      node: 22
+      xcode: latest
+      ios_signing:
+        # Codemagic creates and manages the certificate and provisioning profile from the key
+        # above. That step normally requires a Mac, because Keychain generates the signing
+        # request locally, and not requiring one is why this project can ship at all.
+        distribution_type: app_store
+        bundle_identifier: com.varun.ignyt
+    scripts:
+      - name: Check out the app submodule
+        script: |
+          git submodule update --init --recursive --depth 1
+          echo "app pinned at: $(git -C ignyt-app rev-parse --short HEAD)"
+
+      - name: Install dependencies
+        script: npm ci
+
+      - name: Sync the web layer into the iOS project
+        script: npx cap sync ios
+
+      - name: Apply the managed signing profile
+        script: xcode-project use-profiles
+
+      - name: Keep the build number ahead of TestFlight
+        # TestFlight rejects a build number it has seen before — the same rule that made
+        # Android's versionCode collide three times. Asking App Store Connect what it already
+        # has removes the guesswork. Set APP_APPLE_ID in the Codemagic environment or this
+        # falls back to 1 every run and the second upload collides.
+        script: |
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_APPLE_ID" 2>/dev/null || echo "0")
+          agvtool new-version -all $(($LATEST + 1))
+        working_directory: ios/App
+
+      - name: Build the signed archive
+        script: |
+          set -o pipefail
+          xcode-project build-ipa \
+            --project ios/App/App.xcodeproj \
+            --scheme App \
+            --config Release 2>&1 | tee /tmp/xcode-archive.log
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcode-archive.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        # Review is a one-way door and health apps draw extra scrutiny over HealthKit usage,
+        # so submission stays a deliberate act rather than a side effect of a green build.
+        submit_to_app_store: false
+      email:
+        recipients:
+          - varun642002@gmail.com
+        notify:
+          success: true
+          failure: true

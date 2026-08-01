@@ -1,0 +1,3 @@
+[submodule "ignyt-app"]
+	path = ignyt-app
+	url = https://github.com/varun642002/Ignyt-testing-.git
